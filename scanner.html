@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Student QR Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 0;
+      padding: 16px;
+      background: #f5f5f5;
+    }
+    h2 { margin-bottom: 4px; }
+    #startBtn {
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 8px;
+      border: none;
+      background: #1a73e8;
+      color: white;
+      cursor: pointer;
+    }
+    #reader {
+      width: 100%;
+      max-width: 420px;
+      margin: 12px auto;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    #status {
+      max-width: 420px;
+      margin: 12px auto;
+      padding: 12px;
+      border-radius: 8px;
+      font-weight: bold;
+      min-height: 20px;
+    }
+    .ok { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+    .idle { background: #e2e3e5; color: #383d41; }
+    #log {
+      max-width: 420px;
+      margin: 12px auto;
+      text-align: left;
+      font-size: 14px;
+      background: white;
+      border-radius: 8px;
+      padding: 8px 12px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    #log div { padding: 4px 0; border-bottom: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <h2>Scan Student QR Code</h2>
+  <p>Point the camera at a QR code (format: Name,Section)</p>
+
+  <button id="startBtn">Start Camera</button>
+
+  <div id="reader"></div>
+  <div id="status" class="idle">Tap "Start Camera" to begin.</div>
+  <div id="log"></div>
+
+  <script>
+    // ⚠️ REQUIRED: paste your deployed Apps Script Web App URL here.
+    // It must end in /exec — get it from Apps Script > Deploy > Manage deployments.
+    const APPS_SCRIPT_URL = 'https://script.google.com/a/macros/jcsgo.org/s/AKfycbw4l832Hpg37aHxPvi_qWGUhTnqLb5qieGVWk-_YT32qfCrLbnISX87F2svy4X8QKlD/exec';
+
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    let isProcessing = false;
+    let callbackCounter = 0;
+
+    function setStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = cls;
+    }
+
+    function addLog(text) {
+      const entry = document.createElement('div');
+      entry.textContent = text;
+      logEl.prepend(entry);
+    }
+
+    // Sends the scanned text to the Apps Script backend using JSONP —
+    // this avoids CORS issues entirely since it doesn't use fetch().
+    function sendToSheet(decodedText) {
+      const callbackName = 'qrCallback_' + (callbackCounter++);
+
+      const timeoutId = setTimeout(function () {
+        if (window[callbackName]) {
+          setStatus('No response — check your internet connection or script URL.', 'error');
+          delete window[callbackName];
+          isProcessing = false;
+        }
+      }, 8000);
+
+      window[callbackName] = function (result) {
+        clearTimeout(timeoutId);
+        if (result.status === 'ok') {
+          setStatus(result.message, 'ok');
+          addLog('✔ ' + result.message + ' — ' + new Date().toLocaleTimeString());
+        } else {
+          setStatus(result.message, 'error');
+        }
+        delete window[callbackName];
+        setTimeout(() => { isProcessing = false; }, 1500);
+      };
+
+      const script = document.createElement('script');
+      script.src = APPS_SCRIPT_URL + '?data=' + encodeURIComponent(decodedText) + '&callback=' + callbackName;
+      script.onerror = function () {
+        clearTimeout(timeoutId);
+        setStatus('Could not reach the sheet. Check the script URL.', 'error');
+        isProcessing = false;
+      };
+      document.body.appendChild(script);
+      setTimeout(() => script.remove(), 9000);
+    }
+
+    function onScanSuccess(decodedText) {
+      if (isProcessing) return; // avoid duplicate rapid-fire scans
+      isProcessing = true;
+      setStatus('Saving: ' + decodedText + ' ...', 'idle');
+      sendToSheet(decodedText);
+    }
+
+    const scanner = new Html5Qrcode('reader');
+    const startBtn = document.getElementById('startBtn');
+
+    startBtn.addEventListener('click', function () {
+      if (APPS_SCRIPT_URL.indexOf('PASTE_YOUR') === 0) {
+        setStatus('Edit this file first: paste your Apps Script URL in APPS_SCRIPT_URL.', 'error');
+        return;
+      }
+      startBtn.disabled = true;
+      startBtn.textContent = 'Starting...';
+
+      scanner.start(
+        { facingMode: 'environment' }, // use rear camera
+        { fps: 10, qrbox: 250 },
+        onScanSuccess
+      ).then(function () {
+        startBtn.style.display = 'none';
+        setStatus('Camera active — point at a QR code', 'idle');
+      }).catch(function (err) {
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start Camera';
+        setStatus('Camera error: ' + err, 'error');
+      });
+    });
+  </script>
+</body>
+</html>
