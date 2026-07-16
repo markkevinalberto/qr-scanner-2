@@ -39,6 +39,7 @@
       min-height: 20px;
     }
     .ok { background: #d4edda; color: #155724; }
+    .duplicate { background: #fff3cd; color: #856404; }
     .error { background: #f8d7da; color: #721c24; }
     .idle { background: #e2e3e5; color: #383d41; }
     #log {
@@ -75,6 +76,38 @@
     let isProcessing = false;
     let callbackCounter = 0;
 
+    // ---- Sound feedback (Web Audio API — no sound file needed) ----
+    let audioCtx = null;
+
+    function playTone(freq, duration) {
+      try {
+        if (!audioCtx) return;
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        oscillator.type = 'sine';
+        oscillator.frequency.value = freq;
+        gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + duration);
+      } catch (e) {
+        // Web Audio not available — fail silently, sound is a nice-to-have
+      }
+    }
+
+    function playSuccessBeep() {
+      playTone(880, 0.15); // single high beep
+    }
+    function playDuplicateBeep() {
+      playTone(440, 0.12);
+      setTimeout(() => playTone(440, 0.12), 180); // two short low beeps
+    }
+    function playErrorBeep() {
+      playTone(220, 0.25); // one low buzz
+    }
+
     function setStatus(text, cls) {
       statusEl.textContent = text;
       statusEl.className = cls;
@@ -94,6 +127,7 @@
       const timeoutId = setTimeout(function () {
         if (window[callbackName]) {
           setStatus('No response — check your internet connection or script URL.', 'error');
+          playErrorBeep();
           delete window[callbackName];
           isProcessing = false;
         }
@@ -104,8 +138,14 @@
         if (result.status === 'ok') {
           setStatus(result.message, 'ok');
           addLog('✔ ' + result.message + ' — ' + new Date().toLocaleTimeString());
+          playSuccessBeep();
+        } else if (result.status === 'duplicate') {
+          setStatus(result.message, 'duplicate');
+          addLog('⏳ ' + result.message + ' — ' + new Date().toLocaleTimeString());
+          playDuplicateBeep();
         } else {
           setStatus(result.message, 'error');
+          playErrorBeep();
         }
         delete window[callbackName];
         setTimeout(() => { isProcessing = false; }, 1500);
@@ -116,6 +156,7 @@
       script.onerror = function () {
         clearTimeout(timeoutId);
         setStatus('Could not reach the sheet. Check the script URL.', 'error');
+        playErrorBeep();
         isProcessing = false;
       };
       document.body.appendChild(script);
@@ -123,7 +164,7 @@
     }
 
     function onScanSuccess(decodedText) {
-      if (isProcessing) return; // avoid duplicate rapid-fire scans
+      if (isProcessing) return; // avoid duplicate rapid-fire scans of the same frame
       isProcessing = true;
       setStatus('Saving: ' + decodedText + ' ...', 'idle');
       sendToSheet(decodedText);
@@ -137,6 +178,15 @@
         setStatus('Edit this file first: paste your Apps Script URL in APPS_SCRIPT_URL.', 'error');
         return;
       }
+
+      // Unlock audio playback on iOS — must happen inside a user gesture
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+
       startBtn.disabled = true;
       startBtn.textContent = 'Starting...';
 
