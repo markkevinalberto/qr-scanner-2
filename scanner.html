@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Student QR Scanner</title>
+  <title>QR CODE SCANNER</title>
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <style>
     body {
@@ -57,8 +57,16 @@
   </style>
 </head>
 <body>
-  <h2>Scan Student QR Code</h2>
+  <h2>QR CODE SCANNER</h2>
+  <p id="credentials" style="margin: 0 0 10px; font-size: 14px; color: #555;">Made by MarkKevinAlberto</p>
   <p>Point the camera at a QR code (format: Name,Section)</p>
+
+  <div style="margin-bottom: 12px;">
+    <a id="sheetLink" href="https://docs.google.com/spreadsheets/d/1-1QE8naREL5aevFw_KUtiLP7EVZ8xd3K64A70mtAB6I/edit?usp=sharing" target="_blank" rel="noopener"
+       style="display:inline-block; padding:8px 16px; border-radius:8px; border:1px solid #1a73e8; color:#1a73e8; text-decoration:none; font-size:14px;">
+      📊 View Google Sheet
+    </a>
+  </div>
 
   <button id="startBtn">Start Camera</button>
 
