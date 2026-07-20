@@ -64,6 +64,35 @@
       overflow-y: auto;
     }
     #log div { padding: 4px 0; border-bottom: 1px solid #eee; }
+    #connBanner {
+      max-width: 420px;
+      margin: 0 auto 12px;
+      font-size: 13px;
+      padding: 6px 10px;
+      border-radius: 8px;
+    }
+    #connBanner.online { background: #d4edda; color: #155724; }
+    #connBanner.offline { background: #f8d7da; color: #721c24; }
+    #syncBar {
+      max-width: 420px;
+      margin: 12px auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      font-size: 14px;
+      color: #555;
+    }
+    #syncBtn {
+      padding: 8px 16px;
+      font-size: 14px;
+      border-radius: 8px;
+      border: 1px solid #1a73e8;
+      background: white;
+      color: #1a73e8;
+      cursor: pointer;
+    }
+    #syncBtn:disabled { opacity: 0.6; cursor: default; }
   </style>
 </head>
 <body>
@@ -78,10 +107,18 @@
     </a>
   </div>
 
+  <div id="connBanner"></div>
+
   <button id="startBtn">Start Camera</button>
 
   <div id="reader"></div>
   <div id="status" class="idle">Tap "Start Camera" to begin.</div>
+
+  <div id="syncBar">
+    <span id="pendingCount">0 pending sync</span>
+    <button id="syncBtn">⬆ Sync to Google Sheet</button>
+  </div>
+
   <div id="log"></div>
 
   <script>
@@ -91,8 +128,91 @@
 
     const statusEl = document.getElementById('status');
     const logEl = document.getElementById('log');
+    const connBanner = document.getElementById('connBanner');
+    const pendingCountEl = document.getElementById('pendingCount');
+    const syncBtn = document.getElementById('syncBtn');
     let isProcessing = false;
     let callbackCounter = 0;
+    let isSyncing = false;
+
+    // ---- Local-first storage: every scan is saved to localStorage right away,
+    // then synced to the Google Sheet when a connection is available. ----
+    const QUEUE_KEY = 'qrScanQueue';
+
+    function loadQueue() {
+      try {
+        return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]');
+      } catch (e) {
+        return [];
+      }
+    }
+
+    function saveQueue(queue) {
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+    }
+
+    function addToQueue(text) {
+      const queue = loadQueue();
+      const record = {
+        id: Date.now() + '-' + Math.random().toString(36).slice(2),
+        text: text,
+        time: new Date().toISOString(),
+        status: 'pending',
+        message: null,
+      };
+      queue.push(record);
+      saveQueue(queue);
+      renderLogEntry(record);
+      renderPendingCount();
+      return record;
+    }
+
+    function updateRecord(id, patch) {
+      const queue = loadQueue();
+      const record = queue.find(function (r) { return r.id === id; });
+      if (!record) return null;
+      Object.assign(record, patch);
+      saveQueue(queue);
+      renderLogEntry(record);
+      renderPendingCount();
+      return record;
+    }
+
+    function renderLogEntry(record) {
+      let el = logEl.querySelector('[data-id="' + record.id + '"]');
+      if (!el) {
+        el = document.createElement('div');
+        el.dataset.id = record.id;
+        logEl.prepend(el);
+      }
+      const time = new Date(record.time).toLocaleTimeString();
+      if (record.status === 'synced') {
+        el.textContent = '✔ ' + (record.message || record.text) + ' — ' + time;
+      } else if (record.status === 'duplicate') {
+        el.textContent = '⏳ ' + (record.message || 'Duplicate') + ' — ' + time;
+      } else if (record.status === 'error') {
+        el.textContent = '⚠ ' + record.text + ' — sync failed, will retry — ' + time;
+      } else {
+        el.textContent = '💾 ' + record.text + ' — saved locally, will sync — ' + time;
+      }
+    }
+
+    function renderPendingCount() {
+      const pending = loadQueue().filter(function (r) { return r.status === 'pending' || r.status === 'error'; });
+      pendingCountEl.textContent = pending.length + ' pending sync';
+      syncBtn.disabled = isSyncing || pending.length === 0 || !navigator.onLine;
+    }
+
+    function renderConnBanner() {
+      if (navigator.onLine) {
+        connBanner.textContent = '🟢 Online';
+        connBanner.className = 'online';
+      } else {
+        connBanner.textContent = '🔴 Offline — scans are saved locally and will sync later';
+        connBanner.className = 'offline';
+      }
+      renderPendingCount();
+    }
 
     // ---- Sound feedback (Web Audio API — no sound file needed) ----
     let audioCtx = null;
@@ -131,67 +251,118 @@
       statusEl.className = cls;
     }
 
-    function addLog(text) {
-      const entry = document.createElement('div');
-      entry.textContent = text;
-      logEl.prepend(entry);
+    // Sends one queued record to the Apps Script backend using JSONP —
+    // this avoids CORS issues entirely since it doesn't use fetch(). Resolves
+    // with the server's result, or rejects if the request never came back
+    // (offline, unreachable, etc.) so the caller can leave it queued.
+    function sendToSheet(text) {
+      return new Promise(function (resolve, reject) {
+        const callbackName = 'qrCallback_' + (callbackCounter++);
+
+        const timeoutId = setTimeout(function () {
+          if (window[callbackName]) {
+            delete window[callbackName];
+            reject(new Error('timeout'));
+          }
+        }, 8000);
+
+        window[callbackName] = function (result) {
+          clearTimeout(timeoutId);
+          delete window[callbackName];
+          resolve(result);
+        };
+
+        const script = document.createElement('script');
+        script.src = APPS_SCRIPT_URL + '?data=' + encodeURIComponent(text) + '&callback=' + callbackName;
+        script.onerror = function () {
+          clearTimeout(timeoutId);
+          delete window[callbackName];
+          reject(new Error('network error'));
+        };
+        document.body.appendChild(script);
+        setTimeout(() => script.remove(), 9000);
+      });
     }
 
-    // Sends the scanned text to the Apps Script backend using JSONP —
-    // this avoids CORS issues entirely since it doesn't use fetch().
-    function sendToSheet(decodedText) {
-      const callbackName = 'qrCallback_' + (callbackCounter++);
-
-      const timeoutId = setTimeout(function () {
-        if (window[callbackName]) {
-          setStatus('No response — check your internet connection or script URL.', 'error');
-          playErrorBeep();
-          delete window[callbackName];
-          isProcessing = false;
-        }
-      }, 8000);
-
-      window[callbackName] = function (result) {
-        clearTimeout(timeoutId);
+    // Attempts to sync one queued record; leaves it as 'pending' on failure
+    // so it gets picked up again by the next manual or automatic sync.
+    function trySyncRecord(record, opts) {
+      opts = opts || {};
+      return sendToSheet(record.text).then(function (result) {
         if (result.status === 'ok') {
-          setStatus(result.message, 'ok');
-          addLog('✔ ' + result.message + ' — ' + new Date().toLocaleTimeString());
-          playSuccessBeep();
+          updateRecord(record.id, { status: 'synced', message: result.message });
+          if (opts.feedback) { setStatus(result.message, 'ok'); playSuccessBeep(); }
         } else if (result.status === 'duplicate') {
-          setStatus(result.message, 'duplicate');
-          addLog('⏳ ' + result.message + ' — ' + new Date().toLocaleTimeString());
-          playDuplicateBeep();
+          updateRecord(record.id, { status: 'duplicate', message: result.message });
+          if (opts.feedback) { setStatus(result.message, 'duplicate'); playDuplicateBeep(); }
         } else {
-          setStatus(result.message, 'error');
-          playErrorBeep();
+          updateRecord(record.id, { status: 'error' });
+          if (opts.feedback) { setStatus(result.message, 'error'); playErrorBeep(); }
         }
-        delete window[callbackName];
-        setTimeout(() => { isProcessing = false; }, 1500);
-      };
+      }).catch(function () {
+        updateRecord(record.id, { status: 'pending' });
+        if (opts.feedback) { setStatus('Saved offline — will sync when back online.', 'idle'); }
+      });
+    }
 
-      const script = document.createElement('script');
-      script.src = APPS_SCRIPT_URL + '?data=' + encodeURIComponent(decodedText) + '&callback=' + callbackName;
-      script.onerror = function () {
-        clearTimeout(timeoutId);
-        setStatus('Could not reach the sheet. Check the script URL.', 'error');
-        playErrorBeep();
-        isProcessing = false;
-      };
-      document.body.appendChild(script);
-      setTimeout(() => script.remove(), 9000);
+    // Syncs every queued record that isn't synced yet, one at a time.
+    function syncPending() {
+      if (isSyncing) return Promise.resolve();
+      const toSync = loadQueue().filter(function (r) { return r.status === 'pending' || r.status === 'error'; });
+      if (toSync.length === 0) return Promise.resolve();
+
+      isSyncing = true;
+      renderPendingCount();
+      syncBtn.textContent = 'Syncing...';
+
+      return toSync.reduce(function (chain, record) {
+        return chain.then(function () { return trySyncRecord(record); });
+      }, Promise.resolve()).then(function () {
+        isSyncing = false;
+        syncBtn.textContent = '⬆ Sync to Google Sheet';
+        renderPendingCount();
+      });
     }
 
     function onScanSuccess(decodedText) {
       if (isProcessing) return; // avoid duplicate rapid-fire scans of the same frame
       isProcessing = true;
-      setStatus('Saving: ' + decodedText + ' ...', 'idle');
-      sendToSheet(decodedText);
+
+      const record = addToQueue(decodedText);
+      setStatus('Saved: ' + decodedText, 'idle');
+
+      if (navigator.onLine) {
+        trySyncRecord(record, { feedback: true }).then(function () {
+          setTimeout(() => { isProcessing = false; }, 1500);
+        });
+      } else {
+        setStatus('Saved locally (offline) — will sync later.', 'idle');
+        setTimeout(() => { isProcessing = false; }, 1500);
+      }
     }
 
-    const scanner = new Html5Qrcode('reader');
-    const startBtn = document.getElementById('startBtn');
+    syncBtn.addEventListener('click', function () {
+      syncPending();
+    });
 
-    startBtn.addEventListener('click', function () {
+    window.addEventListener('online', function () {
+      renderConnBanner();
+      syncPending();
+    });
+    window.addEventListener('offline', renderConnBanner);
+
+    renderConnBanner();
+    loadQueue().forEach(renderLogEntry);
+    if (navigator.onLine) syncPending();
+  </script>
+
+  <script>
+    // Kept separate from the sync/queue logic above so a hiccup loading the
+    // html5-qrcode CDN script can't also break offline saving and syncing.
+    const scanner = new Html5Qrcode('reader');
+    const startBtnEl = document.getElementById('startBtn');
+
+    startBtnEl.addEventListener('click', function () {
       if (APPS_SCRIPT_URL.indexOf('PASTE_YOUR') === 0) {
         setStatus('Edit this file first: paste your Apps Script URL in APPS_SCRIPT_URL.', 'error');
         return;
@@ -205,19 +376,19 @@
         audioCtx.resume();
       }
 
-      startBtn.disabled = true;
-      startBtn.textContent = 'Starting...';
+      startBtnEl.disabled = true;
+      startBtnEl.textContent = 'Starting...';
 
       scanner.start(
         { facingMode: 'environment' }, // use rear camera
         { fps: 10, qrbox: 250 },
         onScanSuccess
       ).then(function () {
-        startBtn.style.display = 'none';
+        startBtnEl.style.display = 'none';
         setStatus('Camera active — point at a QR code', 'idle');
       }).catch(function (err) {
-        startBtn.disabled = false;
-        startBtn.textContent = 'Start Camera';
+        startBtnEl.disabled = false;
+        startBtnEl.textContent = 'Start Camera';
         setStatus('Camera error: ' + err, 'error');
       });
     });
